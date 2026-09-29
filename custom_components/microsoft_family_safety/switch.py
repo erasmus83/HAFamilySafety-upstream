@@ -247,21 +247,13 @@ class FamilySafetyPlatformLockSwitch(CoordinatorEntity, SwitchEntity):
         }
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Lock the platform (deprecated — use Account Lock switch instead)."""
-        _LOGGER.warning(
-            "Platform lock switch is deprecated. Use the Account Lock switch instead. "
-            "Attempting legacy lock for %s / %s",
-            self._platform, self._account_name,
-        )
+        """Lock the platform through a mobile-API device override."""
+        _LOGGER.debug("Locking platform %s for %s", self._platform, self._account_name)
         await self.coordinator.async_lock_platform(self._account_id, self._platform)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Unlock the platform (deprecated — use Account Lock switch instead)."""
-        _LOGGER.warning(
-            "Platform lock switch is deprecated. Use the Account Lock switch instead. "
-            "Attempting legacy unlock for %s / %s",
-            self._platform, self._account_name,
-        )
+        """Unlock the platform through a mobile-API device override."""
+        _LOGGER.debug("Unlocking platform %s for %s", self._platform, self._account_name)
         await self.coordinator.async_unlock_platform(self._account_id, self._platform)
 
 

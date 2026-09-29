@@ -1641,6 +1641,11 @@ async def _async_renotify_frontend(
     sent = 0
     last_step: str | None = None
     step_since = loop.time()
+    #: True once the server had to advance a step itself, i.e. no frontend is
+    #: following the flow. Only then are the success forms submitted: on a
+    #: desktop the user is looking at that form, and submitting it from here
+    #: made their own "Submit" fail with "Invalid flow specified".
+    driving = False
     while True:
         await asyncio.sleep(next(delays, _RENOTIFY_INTERVAL_SECONDS))
         if loop.time() > deadline:
@@ -1665,8 +1670,10 @@ async def _async_renotify_frontend(
             last_step, step_since = step, now
         elif (
             step in _AUTO_ADVANCE_STEPS
+            and (driving or step not in _AUTO_SUBMIT_STEPS)
             and now - step_since >= _AUTO_ADVANCE_AFTER_SECONDS
         ):
+            driving = True
             _LOGGER.info(
                 "Home Assistant frontend is not following Microsoft Family flow %s "
                 "(step %s for %.0fs, typical of the Android app); advancing it "

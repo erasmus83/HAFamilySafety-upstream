@@ -291,7 +291,7 @@ A typical single-child setup with a full app list lands around 85-90 entities.
 | **Account Lock** | `switch.{prefix}_lock` | **ON = account locked** (all screen time set to 0). Saves quotas before locking, restores on unlock. Persists across restarts. Attribute `has_saved_policy` shows whether a restore point exists. |
 | **Screen Time Limits** | `switch.{prefix}_screen_time_limits` | OFF = limits disabled (all days set to 24 h). ON = restore the saved schedule. Uses the same save/restore machinery as the lock. |
 | App Block | `switch.{prefix}_app_{appname}` | ON = app blocked. One switch per application. |
-| Platform Lock *(deprecated)* | `switch.{prefix}_{platform}_lock` | ON = platform locked. **Prefer Account Lock** — per-platform lock relies on a Microsoft API that is unreliable. For Windows the integration tries a web-API time override first, then falls back to the mobile API. |
+| Platform Lock | `switch.{prefix}_{platform}_lock` | ON = platform locked. Locks one platform (e.g. Windows) through a Microsoft device override. For Windows the integration tries a web-API time override first, then falls back to the mobile API. Use **Account Lock** to lock every platform at once. |
 
 ### Buttons — Per Child Account
 
@@ -342,7 +342,7 @@ data:
 ```
 
 ```yaml
-# Lock a single platform (deprecated — prefer lock_account, see Switches)
+# Lock a single platform (use lock_account to lock every platform at once)
 service: microsoft_family_safety.lock_platform
 data:
   account_id: "1055519684390826"

@@ -70,6 +70,12 @@
     },
     "progress": {
       "family_sso": "Microsoft sign-in is complete. Home Assistant is finishing the Family session in the open authentication window and fetching the mobile token. This can take up to about 60 seconds. Keep the Microsoft window open; no action is required."
+    },
+    "check_mobile_proxy": {
+      "description": "**Sign in in the window that just opened**, with the Microsoft account that manages the family, and answer **Yes** to \"Stay signed in?\".\n\nThen come back here and **wait**: this dialog continues on its own, which can take up to about a minute after the sign-in. Do not press *Open website* again unless the Microsoft window never opened or was closed before you signed in."
+    },
+    "check_proxy": {
+      "description": "**Sign in in the window that just opened**, with the Microsoft account that manages the family, and answer **Yes** to \"Stay signed in?\".\n\nThen come back here and **wait**: this dialog continues on its own, which can take up to about a minute after the sign-in. Do not press *Open website* again unless the Microsoft window never opened or was closed before you signed in."
     }
   },
   "options": {

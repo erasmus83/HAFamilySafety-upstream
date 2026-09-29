@@ -70,6 +70,12 @@
     },
     "progress": {
       "family_sso": "Die Microsoft-Anmeldung ist abgeschlossen. Home Assistant schließt die Family-Sitzung im offenen Fenster ab und holt das mobile Token. Das kann bis zu etwa 60 Sekunden dauern. Lass das Microsoft-Fenster offen; es ist nichts weiter zu tun."
+    },
+    "check_mobile_proxy": {
+      "description": "**Melde dich im gerade geöffneten Fenster an**, mit dem Microsoft-Konto, das die Familie verwaltet, und antworte bei „Angemeldet bleiben?“ mit **Ja**.\n\nKomm dann hierher zurück und **warte**: Dieser Dialog läuft von selbst weiter, was nach der Anmeldung bis zu etwa einer Minute dauern kann. Klicke nicht erneut auf *Website öffnen*, außer das Microsoft-Fenster hat sich nie geöffnet oder wurde vor der Anmeldung geschlossen."
+    },
+    "check_proxy": {
+      "description": "**Melde dich im gerade geöffneten Fenster an**, mit dem Microsoft-Konto, das die Familie verwaltet, und antworte bei „Angemeldet bleiben?“ mit **Ja**.\n\nKomm dann hierher zurück und **warte**: Dieser Dialog läuft von selbst weiter, was nach der Anmeldung bis zu etwa einer Minute dauern kann. Klicke nicht erneut auf *Website öffnen*, außer das Microsoft-Fenster hat sich nie geöffnet oder wurde vor der Anmeldung geschlossen."
     }
   },
   "options": {
