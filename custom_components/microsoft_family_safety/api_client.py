@@ -590,13 +590,33 @@ class FamilySafetyWebAPI:
         regular reauthentication shows it in the browser.
         """
         lowered = (page or "").lower()
-        interrupt = "terms_of_use" if "account.live.com/tou/" in lowered else None
+        interrupt: str | None = None
+        if "account.live.com/tou/" in lowered:
+            interrupt = "terms_of_use"
+        elif re.search(r"pageid[\"']?\s*:\s*[\"']i5600\b", lowered) or re.search(
+            r"fproofconfirmationrequired[\"']?\s*:\s*(?:true|1|!0)\b", lowered
+        ):
+            # "Help us protect your account" (MSA page i5600): Microsoft wants
+            # the user to confirm a security proof. Seen on login.live.com's
+            # oauth20_authorize.srf during the Family bootstrap, exactly 24 h
+            # after the last interactive sign-in (#52). The page offers a skip
+            # link, but skipping a security check is the account owner's call
+            # and is never done here.
+            interrupt = "proof_confirm"
         if interrupt and interrupt != self.account_interrupt:
-            _LOGGER.warning(
-                "Microsoft asks the account to accept updated Terms of Use before "
-                "the session can be renewed; this needs one interactive sign-in "
-                "from Home Assistant (reauthentication)"
-            )
+            if interrupt == "terms_of_use":
+                _LOGGER.warning(
+                    "Microsoft asks the account to accept updated Terms of Use before "
+                    "the session can be renewed; this needs one interactive sign-in "
+                    "from Home Assistant (reauthentication)"
+                )
+            else:
+                _LOGGER.warning(
+                    "Microsoft asks the account to confirm its security info "
+                    "(\"Help us protect your account\") before the Family session "
+                    "can be renewed; this needs one interactive sign-in, at "
+                    "account.microsoft.com or from Home Assistant (reauthentication)"
+                )
         self.account_interrupt = interrupt
 
     async def _async_renew_account_session(

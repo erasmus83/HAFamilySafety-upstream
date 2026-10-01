@@ -1337,6 +1337,16 @@ class FamilySafetyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._native_web_auth
             and getattr(self.web_api, "account_interrupt", None) == "terms_of_use"
             else
+            "Microsoft asks you to confirm your account's security info (\"Help us "
+            "protect your account\") before the Family Safety session can be "
+            "renewed.\n\n"
+            "Sign in at https://account.microsoft.com with the parent account and "
+            "confirm the security info Microsoft shows, then wait a few minutes: the "
+            "integration picks the session up again on its own. Completing the "
+            "reauthentication Home Assistant has started works too."
+            if self._native_web_auth
+            and getattr(self.web_api, "account_interrupt", None) == "proof_confirm"
+            else
             "Your Microsoft Family Safety web session is missing or has expired.\n\n"
             "Home Assistant has started a reauthentication flow. Open the integration "
             "or the Repairs page and complete the Microsoft sign-in to renew both the "
