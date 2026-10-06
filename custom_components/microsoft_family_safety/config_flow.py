@@ -961,6 +961,40 @@ class FamilySafetyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
         return self.async_external_step_done(next_step_id="finish_proxy")
 
+    def _attach_to_finish_task(self) -> FlowResult | None:
+        """Attach a repeat finish_proxy entry to the tracked completion.
+
+        Returns None when no completion has been started yet, i.e. this entry
+        should start it.
+        """
+        if self._finish_task is None:
+            return None
+        if not self._finish_task.done():
+            _LOGGER.debug(
+                "Native auth flow %s: repeat finish_proxy entry while the "
+                "web-first completion is still running; attaching to it",
+                self.flow_id,
+            )
+            return self.async_show_progress(
+                step_id="finish_proxy",
+                progress_action="family_sso",
+                progress_task=self._finish_task,
+            )
+        if self._finish_result is None:
+            try:
+                self._finish_result = self._finish_task.result()
+            except Exception:  # noqa: BLE001 - surface as a flow abort
+                _LOGGER.exception(
+                    "Native auth flow %s failed while completing the "
+                    "web-first sign-in",
+                    self.flow_id,
+                )
+                self._finish_result = self.async_abort(reason="native_auth_failed")
+            return self.async_show_progress_done(next_step_id="finish_web_first_done")
+        # Defensive: the flow manager removes the flow once a terminal result
+        # is returned, so this should be unreachable.
+        return self._finish_result
+
     async def async_step_finish_proxy(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -975,36 +1009,8 @@ class FamilySafetyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # that is actually succeeding. Attach repeat entries to the tracked
         # completion instead. (Same class of race the existing-entry path guards
         # against further down in this method.)
-        if self._finish_task is not None:
-            if not self._finish_task.done():
-                _LOGGER.debug(
-                    "Native auth flow %s: repeat finish_proxy entry while the "
-                    "web-first completion is still running; attaching to it",
-                    self.flow_id,
-                )
-                return self.async_show_progress(
-                    step_id="finish_proxy",
-                    progress_action="family_sso",
-                    progress_task=self._finish_task,
-                )
-            if self._finish_result is None:
-                try:
-                    self._finish_result = self._finish_task.result()
-                except Exception:  # noqa: BLE001 - surface as a flow abort
-                    _LOGGER.exception(
-                        "Native auth flow %s failed while completing the "
-                        "web-first sign-in",
-                        self.flow_id,
-                    )
-                    self._finish_result = self.async_abort(
-                        reason="native_auth_failed"
-                    )
-                return self.async_show_progress_done(
-                    next_step_id="finish_web_first_done"
-                )
-            # Defensive: the flow manager removes the flow once a terminal
-            # result is returned, so this should be unreachable.
-            return self._finish_result
+        if (attached := self._attach_to_finish_task()) is not None:
+            return attached
 
         proxy = self._native_proxy
         _LOGGER.debug(
@@ -1037,6 +1043,12 @@ class FamilySafetyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await unregister_native_proxy(self.hass, proxy)
         except Exception as err:
             _LOGGER.debug("Could not unregister native web auth proxy: %s", err)
+        # A second entry can pass the guard above while the first is suspended
+        # in that await (the proxy is still set and complete until the line
+        # below). Whichever entry resumes first starts the completion; the
+        # other attaches to it here instead of starting a second exchange.
+        if (attached := self._attach_to_finish_task()) is not None:
+            return attached
         self._native_proxy = None
         if not cookies:
             _LOGGER.warning(
