@@ -17,7 +17,7 @@ from yarl import URL
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -445,18 +445,33 @@ class FamilySafetyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_block_app(self, account_id: str, app_id: str) -> None:
         """Block an application."""
-        app = self.get_application(account_id, app_id)
-        if app is None:
-            raise ValueError(f"Application {app_id} not found for account {account_id}")
-        await app.block_app()
-        await self.async_request_refresh()
+        await self._async_set_app_blocked(account_id, app_id, True)
 
     async def async_unblock_app(self, account_id: str, app_id: str) -> None:
         """Unblock an application."""
+        await self._async_set_app_blocked(account_id, app_id, False)
+
+    async def _async_set_app_blocked(
+        self, account_id: str, app_id: str, blocked: bool
+    ) -> None:
+        """Block or unblock one app, failing as a HomeAssistantError.
+
+        A raw pyfamilysafety HttpException escaped the switch and service
+        before, so ``continue_on_error`` in an automation could not skip one
+        rejected app (#54).
+        """
         app = self.get_application(account_id, app_id)
         if app is None:
-            raise ValueError(f"Application {app_id} not found for account {account_id}")
-        await app.unblock_app()
+            raise HomeAssistantError(
+                f"Application {app_id} not found for account {account_id}"
+            )
+        try:
+            await (app.block_app() if blocked else app.unblock_app())
+        except HttpException as err:
+            raise HomeAssistantError(
+                f"Microsoft rejected {'blocking' if blocked else 'unblocking'} "
+                f"{app_id}: {err}"
+            ) from err
         await self.async_request_refresh()
 
     async def async_lock_platform(
@@ -1346,6 +1361,14 @@ class FamilySafetyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "reauthentication Home Assistant has started works too."
             if self._native_web_auth
             and getattr(self.web_api, "account_interrupt", None) == "proof_confirm"
+            else
+            "Microsoft asks for a new interactive sign-in before the Family Safety "
+            "session can be renewed. On some accounts Microsoft requires this every "
+            "24 hours for Family Safety, even with \"Stay signed in?\" answered Yes.\n\n"
+            "Home Assistant has started a reauthentication flow. Open the integration "
+            "or the Repairs page and complete the Microsoft sign-in."
+            if self._native_web_auth
+            and getattr(self.web_api, "account_interrupt", None) == "signin_required"
             else
             "Your Microsoft Family Safety web session is missing or has expired.\n\n"
             "Home Assistant has started a reauthentication flow. Open the integration "

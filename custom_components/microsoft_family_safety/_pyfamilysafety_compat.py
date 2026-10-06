@@ -62,6 +62,7 @@ import time
 from typing import Any
 
 import aiohttp
+from pyfamilysafety import application as _pfs_application
 from pyfamilysafety.account import Account
 from pyfamilysafety.api import FamilySafetyAPI
 from pyfamilysafety.authenticator import Authenticator
@@ -87,6 +88,7 @@ _DATA_SOURCE_PATCH_MARKER = "_hafs_mobile_first_data_sources_patch"
 _WEB_PROBE_PATCH_MARKER = "_hafs_web_probe_backoff_patch"
 _CONNECTION_STATE_PATCH_MARKER = "_hafs_connection_state_diagnostics_patch"
 _ROSTER_TOLERANCE_PATCH_MARKER = "_hafs_roster_tolerance_patch"
+_APP_PLATFORM_PATCH_MARKER = "_hafs_app_platform_patch"
 
 # Back off private account.microsoft.com probes after transport failures. Mobile
 # data continues to refresh normally during the backoff window.
@@ -650,6 +652,31 @@ def _patch_connection_state_diagnostics() -> bool:
     return True
 
 
+def _patch_app_platform() -> bool:
+    """Send a Plat-Info header for classic desktop apps (``win32:`` ids).
+
+    pyfamilysafety 1.1.2's ``application.get_platform`` only knows the ``x:``,
+    ``appx:`` and ``a:`` prefixes, so blocking or unblocking a ``win32:`` app
+    (Steam, CurseForge, javaw...) sent no Plat-Info and Microsoft answered
+    400 "The platform field is required" (#54). ``Application.block_app`` and
+    ``unblock_app`` look the helper up as a module global at call time, so
+    replacing it there is enough.
+    """
+    current = _pfs_application.get_platform
+    if getattr(current, _APP_PLATFORM_PATCH_MARKER, False):
+        return False
+    original = current
+
+    def _patched_get_platform(app_id: str):
+        if isinstance(app_id, str) and app_id.lower().startswith("win32:"):
+            return "WINDOWS"
+        return original(app_id)
+
+    setattr(_patched_get_platform, _APP_PLATFORM_PATCH_MARKER, True)
+    _pfs_application.get_platform = _patched_get_platform
+    return True
+
+
 def _patch_account_roster_tolerance() -> bool:
     """Keep loading a family member when Microsoft cannot resolve part of it.
 
@@ -747,6 +774,9 @@ def apply_patches(hass: HomeAssistant) -> None:
 
     if _patch_connection_state_diagnostics():
         applied.append("connection source diagnostics")
+
+    if _patch_app_platform():
+        applied.append("Plat-Info for win32 desktop apps")
 
     if _patch_account_roster_tolerance():
         applied.append("per-member roster error tolerance")

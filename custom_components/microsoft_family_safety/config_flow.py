@@ -330,16 +330,52 @@ class FamilySafetyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.debug("Starting native Microsoft Family mobile OAuth proxy (legacy add-on entry)")
             return self.async_external_step(step_id="check_mobile_proxy", url=proxy_url)
 
+        resume_cookies = self._interrupt_resume_cookies()
         self._native_proxy = MicrosoftFamilyAuthProxy(
             self.hass,
             callback_url=callback_url,
             start_url="https://account.microsoft.com/",
             completion_mode="web",
+            initial_cookies=resume_cookies,
         )
         register_native_proxy(self.hass, self._native_proxy)
         proxy_url = str(hass_url.with_path(self._native_proxy.access_path))
-        _LOGGER.debug("Starting native Microsoft Family web sign-in proxy (web-first)")
+        _LOGGER.debug(
+            "Starting native Microsoft Family web sign-in proxy (web-first, "
+            "resuming stored session=%s)",
+            bool(resume_cookies),
+        )
         return self.async_external_step(step_id="check_mobile_proxy", url=proxy_url)
+
+    def _interrupt_resume_cookies(self) -> list[dict[str, Any]] | None:
+        """Return the stored session when Microsoft waits for a security check.
+
+        When the integration's own session hits "Help us protect your account"
+        (``account_interrupt == "proof_confirm"``), a fresh sign-in never shows
+        that page: neither the user's browser nor an empty proxy jar carry the
+        session Microsoft is challenging (#52). Starting the reauthentication
+        from the stored cookies lets the user reach that page and confirm it
+        themselves. Any other case keeps the clean, cookie-less sign-in.
+        """
+        if not self._is_existing_entry_auth_flow():
+            return None
+        entry = self._get_existing_entry()
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        web_api = getattr(coordinator, "web_api", None)
+        if getattr(web_api, "account_interrupt", None) != "proof_confirm":
+            return None
+        try:
+            cookies = web_api.export_web_cookies()
+        except Exception as err:  # noqa: BLE001 - fall back to a clean sign-in
+            _LOGGER.debug("Could not export stored cookies for reauth: %r", err)
+            return None
+        if not cookies:
+            return None
+        _LOGGER.info(
+            "Microsoft asks this account to confirm its security info; starting "
+            "the sign-in from the stored session so the page can be confirmed"
+        )
+        return cookies
 
     def _uses_legacy_addon(self) -> bool:
         """Return whether this flow serves a Playwright add-on entry.

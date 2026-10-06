@@ -617,7 +617,12 @@ class FamilySafetyWebAPI:
                     "can be renewed; this needs one interactive sign-in, at "
                     "account.microsoft.com or from Home Assistant (reauthentication)"
                 )
-        self.account_interrupt = interrupt
+        # Only ever upgrade the verdict here. A later page without a marker
+        # (the plain "Continue" form, a login page) used to reset a detected
+        # interrupt to None in the middle of the same outage (#52); it is
+        # cleared only once a renewal or the Family context succeeds again.
+        if interrupt:
+            self.account_interrupt = interrupt
 
     async def _async_renew_account_session(
         self, session: Any, page: str | None, final_url: URL | None
@@ -774,6 +779,14 @@ class FamilySafetyWebAPI:
                         self.family_context_state = "auth_required"
                         self.family_token_source = None
                         self.last_web_error_code = "FAMILY_CONTEXT_AUTH_REQUIRED"
+                        # The page itself may name the reason (i5600, terms);
+                        # otherwise Microsoft simply wants an interactive
+                        # sign-in for the Family app, typically
+                        # login.microsoftonline.com/.../authorize?prompt=login
+                        # 24 h after the last one on some accounts (#52, #50).
+                        self._note_account_interrupt(page)
+                        if self.account_interrupt is None:
+                            self.account_interrupt = "signin_required"
                         # A Family-SPA bootstrap redirect is not proof that the
                         # independently verified /account session has expired.
                         # Keep web_session_state untouched and surface this as a
@@ -830,6 +843,7 @@ class FamilySafetyWebAPI:
                             self.family_context_state = "ready"
                             self.family_token_source = "family_page"
                             self.last_web_error_code = None
+                            self.account_interrupt = None
                             self._family_auth_required_until = 0.0
                             self._family_auth_required_warned = False
                             _LOGGER.debug(

@@ -195,6 +195,18 @@ Fixed in 2.0.4: Microsoft's sign-in page links some pages with an explicit port 
 - On a phone, once the Microsoft page shows *Authentication completed*, close it and switch back to Home Assistant; since 2.0.9 the dialog continues on its own within a few seconds. On older versions, sign in from a desktop browser instead.
 - *"The browser authentication flow expired. Please start again."* -- restart the flow.
 
+
+### "502 Bad Gateway" from nginx during sign-in
+
+nginx logs `upstream sent too big header while reading response header from upstream`. Microsoft's sign-in pages answer with large cookie headers, and the integration's sign-in proxy passes them on, which overflows nginx's default response-header buffer (4 or 8 KB). Raise it in the `location` that proxies Home Assistant:
+
+```nginx
+proxy_buffer_size       128k;
+proxy_buffers           4 256k;
+proxy_busy_buffers_size 256k;
+```
+
+Nginx Proxy Manager: add the same three lines under the host's **Advanced** tab. Then restart the sign-in.
 ### Wrong account
 
 *"A different Microsoft account was used."* -- reauthentication must use the same Microsoft account the entry was created with.

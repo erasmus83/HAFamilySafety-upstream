@@ -626,6 +626,18 @@ Microsoft's sign-in page links some of its own pages with an explicit port (`log
 - **On a phone** (Home Assistant app or mobile browser) the Microsoft page opens in a separate browser. Once it shows *Authentication completed*, close it and switch back to Home Assistant: since 2.0.9 the dialog picks up the result within a few seconds of coming back. Before 2.0.9 it could stay stuck because Android pauses the app while the sign-in runs; signing in from a desktop browser avoids that on older versions.
 - If Home Assistant aborts with *"Native web authentication could not be loaded"* or *"The browser authentication flow expired"*, simply restart the flow.
 
+
+### "502 Bad Gateway" from nginx during sign-in
+
+nginx logs `upstream sent too big header while reading response header from upstream`. Microsoft's sign-in pages answer with large cookie headers, and the integration's sign-in proxy passes them on, which overflows nginx's default response-header buffer (4 or 8 KB). Raise it in the `location` that proxies Home Assistant:
+
+```nginx
+proxy_buffer_size       128k;
+proxy_buffers           4 256k;
+proxy_busy_buffers_size 256k;
+```
+
+Nginx Proxy Manager: add the same three lines under the host's **Advanced** tab. Then restart the sign-in.
 ### "Automatic browser authentication normally requires HTTPS"
 
 Your Home Assistant URL is not HTTPS. Either configure HTTPS (recommended), or enable **Allow insecure local HTTP authentication (testing only)** — which only works for local hostnames and private IP addresses. See [Insecure local HTTP authentication](#insecure-local-http-authentication).

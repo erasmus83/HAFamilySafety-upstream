@@ -1673,14 +1673,13 @@ async def _async_renotify_frontend(
             and (driving or step not in _AUTO_SUBMIT_STEPS)
             and now - step_since >= _AUTO_ADVANCE_AFTER_SECONDS
         ):
-            driving = True
             _LOGGER.info(
                 "Home Assistant frontend is not following Microsoft Family flow %s "
                 "(step %s for %.0fs, typical of the Android app); advancing it "
                 "server-side", flow_id, step, now - step_since,
             )
             try:
-                await hass.config_entries.flow.async_configure(
+                result = await hass.config_entries.flow.async_configure(
                     flow_id, {} if step in _AUTO_SUBMIT_STEPS else None
                 )
             except UnknownFlow:
@@ -1691,6 +1690,13 @@ async def _async_renotify_frontend(
                     flow_id, step, err,
                 )
                 return
+            # Only count as "driving" when this call actually moved the flow:
+            # a long-running progress step answers with the same step, and
+            # treating that as abandonment would later submit a success form
+            # a desktop user is looking at (review of PR #57).
+            new_step = result.get("step_id") if isinstance(result, dict) else None
+            if new_step != step:
+                driving = True
             step_since = loop.time()
             continue
         hass.bus.async_fire_internal(
