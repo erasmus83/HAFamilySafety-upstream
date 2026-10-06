@@ -25,6 +25,15 @@ from .const import DAY_KEYS
 
 _LOGGER = logging.getLogger(__name__)
 
+#: Xbox activity report (/family/api/xbox/recent-activity/report-v3): fetched at
+#: most once per window per child, and not at all for a while after a timeout or
+#: network error. Microsoft tar-pits this endpoint when it is polled often.
+_XBOX_REPORT_MIN_INTERVAL_SECONDS = 5 * 60
+_XBOX_REPORT_BACKOFF_SECONDS = 30 * 60
+#: A poll interval equal to the window lands a fraction of a second early each
+#: time; without this slack every other poll would be skipped.
+_XBOX_REPORT_SLACK_SECONDS = 30
+
 _BASE_URL = "https://mobileaggregator.family.microsoft.com/api"
 _APP_VERSION = "v 1.26.0.1001"
 _USER_AGENT = f"Family Safety-prod/({_APP_VERSION}) Android/33 google/Pixel 4 XL"
@@ -163,6 +172,9 @@ class FamilySafetyWebAPI:
         # Family API.  The Family SPA issues its own request-verification token
         # in /family/home; keep that context separate from /account health.
         self.family_context_state: str = "unknown"
+        #: child id -> time.monotonic() before which the Xbox activity report is
+        #: not fetched again (minimum interval, or backoff after a failure).
+        self._xbox_report_next_fetch: dict[str, float] = {}
         self.family_context_last_checked: int | None = None
         self.family_context_last_http_status: int | None = None
         self.family_context_last_path: str | None = None
@@ -1516,20 +1528,30 @@ class FamilySafetyWebAPI:
         Reads /family/api/xbox/recent-activity/report-v3 (isPreviousWeek=false =
         current week) and picks the day matching target_date (local YYYY-MM-DD).
 
+        Returns None when the report is not fetched this time -- inside the
+        per-child minimum interval or a backoff -- or the fetch fails; the
+        coordinator keeps the last same-day value in that case.
+
         Microsoft tar-pits this endpoint when it is polled often (the request is
-        accepted but the body never arrives, hanging ~120 s). Cap the wait at
-        20 s so a throttled call fails fast and cannot stall the coordinator poll
-        or hold the connection sensor in a long "degraded" window.
+        accepted but the body never arrives, hanging ~120 s). The wait is capped
+        at 20 s, and a timeout or network error backs this child off for
+        _XBOX_REPORT_BACKOFF_SECONDS, so a throttled endpoint is not hit again
+        on every poll.
         """
         if not self._web_cookies:
             return None
+        key = str(child_id)
+        now = time.monotonic()
+        if now < self._xbox_report_next_fetch.get(key, 0.0) - _XBOX_REPORT_SLACK_SECONDS:
+            return None
+        self._xbox_report_next_fetch[key] = now + _XBOX_REPORT_MIN_INTERVAL_SECONDS
         try:
             result = await asyncio.wait_for(
                 self._web_request(
                     "GET",
                     f"{self.WEB_API_BASE}/family/api/xbox/recent-activity/report-v3",
                     params={
-                        "childId": str(child_id),
+                        "childId": key,
                         "isPreviousWeek": "false",
                         "timeZone": time_zone or "UTC",
                     },
@@ -1537,14 +1559,26 @@ class FamilySafetyWebAPI:
                 timeout=20,
             )
         except asyncio.TimeoutError:
-            _LOGGER.debug(
-                "Xbox activity report hit the 20s fast cap; keeping last value"
-            )
+            self._back_off_xbox_report(key, "hit the 20 s cap")
             return None
         except Exception as err:  # noqa: BLE001 - keep the poll healthy
             _LOGGER.debug("Xbox activity report fetch failed: %r", err)
             return None
+        if result is None and self.last_web_error_code in ("TIMEOUT", "NETWORK_ERROR"):
+            self._back_off_xbox_report(key, self.last_web_error_code.lower())
+            return None
         return self._extract_daily_usage_minutes(result, target_date)
+
+    def _back_off_xbox_report(self, key: str, reason: str) -> None:
+        """Skip the Xbox activity report for this child for a while."""
+        self._xbox_report_next_fetch[key] = (
+            time.monotonic() + _XBOX_REPORT_BACKOFF_SECONDS
+        )
+        _LOGGER.info(
+            "Xbox activity report %s for child %s; not fetching it again for %d "
+            "minutes (last value kept)",
+            reason, key, _XBOX_REPORT_BACKOFF_SECONDS // 60,
+        )
 
     @staticmethod
     def _extract_daily_usage_minutes(payload: object, target_date: str) -> int | None:

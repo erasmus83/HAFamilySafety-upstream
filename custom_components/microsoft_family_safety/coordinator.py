@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 import logging
+import time
 from typing import Any
 
 from pyfamilysafety import FamilySafety
@@ -1311,15 +1312,19 @@ class FamilySafetyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Xbox usage: since about 2026-08-20 the mobile aggregator
                 # reports 0 (or a stale figure) for Xbox play on some accounts,
                 # so read the Xbox activity report from the web API as well.
-                # Only attempt it in a cycle where the schedule read succeeded:
-                # if the web session is being throttled this cycle, don't pile
-                # another request onto it (Microsoft tar-pits this endpoint).
+                # Only while the Family session is healthy and not backing off,
+                # so a throttled session never gets another request piled onto
+                # it. Not gated on the /st (Windows schedule) read: a child with
+                # no Windows schedule still has Xbox usage. The per-child
+                # interval and backoff live in get_xbox_screentime_usage().
                 today_iso = dt_util.now().date().isoformat()
                 xbox_usage: int | None = None
                 if (
                     self.web_api is not None
                     and self.web_api.has_web_cookies
-                    and self.web_api.screentime_policy_status == "ok"
+                    and self.web_api.family_context_state == "ready"
+                    and float(getattr(self.web_api, "_family_web_backoff_until", 0.0) or 0.0)
+                    <= time.monotonic()
                 ):
                     try:
                         xbox_usage = await self.web_api.get_xbox_screentime_usage(
@@ -1344,12 +1349,11 @@ class FamilySafetyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Xbox, so it replaces the account figure only when it is
                 # higher: a child who also uses Windows keeps the mobile total,
                 # and an account the aggregator now reports as 0 gets its Xbox
-                # time back. Never lower a reported usage figure.
+                # time back. Never lower a reported usage figure. The raw_*
+                # fields keep exactly what the mobile aggregator returned.
                 mobile_usage = accounts_data[account_id].get("today_screentime_usage")
                 if xbox_usage is not None and xbox_usage > (mobile_usage or 0):
                     accounts_data[account_id]["today_screentime_usage"] = xbox_usage
-                    accounts_data[account_id]["raw_today_screentime_usage"] = xbox_usage
-                    accounts_data[account_id]["raw_today_screentime_ms"] = xbox_usage * 60000
             await self._async_track_family_context()
             await self._async_sync_roster_notification(accounts_data)
             self._accounts = new_accounts
