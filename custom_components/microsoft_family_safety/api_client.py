@@ -33,6 +33,11 @@ _XBOX_REPORT_BACKOFF_SECONDS = 30 * 60
 #: A poll interval equal to the window lands a fraction of a second early each
 #: time; without this slack every other poll would be skipped.
 _XBOX_REPORT_SLACK_SECONDS = 30
+#: A child without an Xbox gets 403 (or 404) from the report, and always will.
+#: Backoff after consecutive such answers: 1 h, then 6 h, then 24 h from the
+#: third on; any successful report resets it. Escalating rather than a flat 24 h
+#: so a one-off 403 for a child who does have an Xbox costs an hour, not a day.
+_XBOX_REPORT_NO_DATA_BACKOFF_SECONDS = (60 * 60, 6 * 60 * 60, 24 * 60 * 60)
 
 _BASE_URL = "https://mobileaggregator.family.microsoft.com/api"
 _APP_VERSION = "v 1.26.0.1001"
@@ -175,6 +180,10 @@ class FamilySafetyWebAPI:
         #: child id -> time.monotonic() before which the Xbox activity report is
         #: not fetched again (minimum interval, or backoff after a failure).
         self._xbox_report_next_fetch: dict[str, float] = {}
+        #: child id -> consecutive 403/404 answers from the Xbox report.
+        self._xbox_report_no_data: dict[str, int] = {}
+        #: Outcome of the last _web_request(isolated=True) call.
+        self.last_isolated_error_code: str | None = None
         self.family_context_last_checked: int | None = None
         self.family_context_last_http_status: int | None = None
         self.family_context_last_path: str | None = None
@@ -997,14 +1006,40 @@ class FamilySafetyWebAPI:
         params: dict | None = None,
         json_data: dict | None = None,
         relationship_child_id: str | None = None,
+        isolated: bool = False,
     ) -> dict | list | None:
-        """Call the private Family web API using the captured browser session."""
+        """Call the private Family web API using the captured browser session.
+
+        isolated=True is for optional endpoints whose failure says nothing about
+        the session (e.g. an Xbox report answering 403 for a child without an
+        Xbox). Such a call never touches family_context_state, the antiforgery
+        token, web_session/web_api health or last_web_error_code, and does not
+        warm the Family context itself; its outcome goes to
+        last_isolated_error_code instead ("HTTP_<status>", "LOGIN_REDIRECT",
+        "TIMEOUT", ...). Cookie rotations are still captured.
+        """
         # Every outcome below sets its own code; clear the previous one so a
-        # caller inspecting last_web_error_code after this call never reads a
-        # stale value from an earlier request.
-        self.last_web_error_code = None
+        # caller inspecting the code after this call never reads a stale value
+        # from an earlier request.
+        def _set_error(code: str | None) -> None:
+            if isolated:
+                self.last_isolated_error_code = code
+            else:
+                self.last_web_error_code = code
+
+        def _no_mark(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        mark_session = _no_mark if isolated else self._mark_web_session
+        mark_api = _no_mark if isolated else self._mark_web_api
+        warn = _LOGGER.debug if isolated else _LOGGER.warning
+
+        _set_error(None)
         if not self._web_cookies:
-            self.last_web_error_code = "NO_WEB_SESSION"
+            _set_error("NO_WEB_SESSION")
+            return None
+        if not self._web_csrf and isolated:
+            _set_error("NO_FAMILY_CONTEXT")
             return None
         if not self._web_csrf:
             token = await self._warm_family_context()
@@ -1078,9 +1113,9 @@ class FamilySafetyWebAPI:
                 allow_redirects=False,
             ) as resp:
                 if resp.status in (200, 201, 204):
-                    self.last_web_error_code = None
-                    self._mark_web_session("authenticated", resp.status)
-                    self._mark_web_api("ok", endpoint, resp.status)
+                    _set_error(None)
+                    mark_session("authenticated", resp.status)
+                    mark_api("ok", endpoint, resp.status)
                     text = await resp.text()
                     self.sync_web_cookies_from_session()
                     if not text:
@@ -1101,10 +1136,10 @@ class FamilySafetyWebAPI:
                     except ValueError:
                         destination = None
                     if self._is_authentication_url(destination):
-                        self.last_web_error_code = "LOGIN_REDIRECT"
-                        self._mark_web_session("expired", resp.status)
-                        self._mark_web_api("auth_redirect", endpoint, resp.status)
-                        _LOGGER.warning(
+                        _set_error("LOGIN_REDIRECT")
+                        mark_session("expired", resp.status)
+                        mark_api("auth_redirect", endpoint, resp.status)
+                        warn(
                             "Family web API redirected to authentication: "
                             "endpoint=%s destination_host=%s destination_path=%s",
                             endpoint,
@@ -1112,9 +1147,9 @@ class FamilySafetyWebAPI:
                             destination.path if destination else None,
                         )
                     else:
-                        self.last_web_error_code = "HTTP_REDIRECT"
-                        self._mark_web_api("redirect", endpoint, resp.status)
-                        _LOGGER.warning(
+                        _set_error("HTTP_REDIRECT")
+                        mark_api("redirect", endpoint, resp.status)
+                        warn(
                             "Family web API returned a non-authentication redirect: "
                             "endpoint=%s destination_host=%s destination_path=%s; "
                             "leaving web-session auth state unchanged",
@@ -1124,6 +1159,13 @@ class FamilySafetyWebAPI:
                         )
                     return None
                 body = await resp.text()
+                if isolated:
+                    _set_error(f"HTTP_{resp.status}")
+                    _LOGGER.debug(
+                        "Optional Family web API endpoint answered %s: %s %s",
+                        resp.status, endpoint, body[:200],
+                    )
+                    return None
                 if resp.status in (401, 403):
                     self.last_web_error_code = "AUTH_ERROR"
                     self._mark_web_api("auth_error", endpoint, resp.status)
@@ -1178,12 +1220,12 @@ class FamilySafetyWebAPI:
                 return None
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - started
-            self.last_web_error_code = "TIMEOUT"
-            self._mark_web_api("timeout", endpoint)
+            _set_error("TIMEOUT")
+            mark_api("timeout", endpoint)
             # A private endpoint timeout is not proof that the Microsoft browser
             # login expired. Preserve web_session_state from the independent
             # /family probe and expose endpoint health separately.
-            _LOGGER.warning(
+            warn(
                 "Family web API request timed out after %.1fs: %s %s",
                 elapsed,
                 method,
@@ -1191,9 +1233,9 @@ class FamilySafetyWebAPI:
             )
             return None
         except aiohttp.ClientError as err:
-            self.last_web_error_code = "NETWORK_ERROR"
-            self._mark_web_api("network_error", endpoint)
-            _LOGGER.warning("Web API request failed on %s: %s", endpoint, err)
+            _set_error("NETWORK_ERROR")
+            mark_api("network_error", endpoint)
+            warn("Web API request failed on %s: %s", endpoint, err)
             return None
 
     @staticmethod
@@ -1537,6 +1579,10 @@ class FamilySafetyWebAPI:
         at 20 s, and a timeout or network error backs this child off for
         _XBOX_REPORT_BACKOFF_SECONDS, so a throttled endpoint is not hit again
         on every poll.
+
+        The call is isolated (see _web_request): a child without an Xbox gets
+        403, which must not be read as a Family authentication failure. 403/404
+        back that child off per _XBOX_REPORT_NO_DATA_BACKOFF_SECONDS.
         """
         if not self._web_cookies:
             return None
@@ -1555,29 +1601,43 @@ class FamilySafetyWebAPI:
                         "isPreviousWeek": "false",
                         "timeZone": time_zone or "UTC",
                     },
+                    isolated=True,
                 ),
                 timeout=20,
             )
         except asyncio.TimeoutError:
-            self._back_off_xbox_report(key, "hit the 20 s cap")
+            self._back_off_xbox_report(key, "hit the 20 s cap", _XBOX_REPORT_BACKOFF_SECONDS)
             return None
         except Exception as err:  # noqa: BLE001 - keep the poll healthy
             _LOGGER.debug("Xbox activity report fetch failed: %r", err)
             return None
-        if result is None and self.last_web_error_code in ("TIMEOUT", "NETWORK_ERROR"):
-            self._back_off_xbox_report(key, self.last_web_error_code.lower())
+        if result is None:
+            code = self.last_isolated_error_code
+            if code in ("HTTP_403", "HTTP_404"):
+                misses = self._xbox_report_no_data.get(key, 0)
+                self._xbox_report_no_data[key] = misses + 1
+                delays = _XBOX_REPORT_NO_DATA_BACKOFF_SECONDS
+                self._back_off_xbox_report(
+                    key,
+                    f"answered {code[5:]} (no Xbox data for this child)",
+                    delays[min(misses, len(delays) - 1)],
+                )
+            elif code in ("TIMEOUT", "NETWORK_ERROR"):
+                self._back_off_xbox_report(
+                    key, code.lower().replace("_", " "), _XBOX_REPORT_BACKOFF_SECONDS
+                )
             return None
+        self._xbox_report_no_data.pop(key, None)
         return self._extract_daily_usage_minutes(result, target_date)
 
-    def _back_off_xbox_report(self, key: str, reason: str) -> None:
+    def _back_off_xbox_report(self, key: str, reason: str, seconds: int) -> None:
         """Skip the Xbox activity report for this child for a while."""
-        self._xbox_report_next_fetch[key] = (
-            time.monotonic() + _XBOX_REPORT_BACKOFF_SECONDS
-        )
+        self._xbox_report_next_fetch[key] = time.monotonic() + seconds
         _LOGGER.info(
-            "Xbox activity report %s for child %s; not fetching it again for %d "
-            "minutes (last value kept)",
-            reason, key, _XBOX_REPORT_BACKOFF_SECONDS // 60,
+            "Xbox activity report %s for child %s; not fetching it again for %s "
+            "(last value kept)",
+            reason, key,
+            f"{seconds // 3600} h" if seconds >= 3600 else f"{seconds // 60} min",
         )
 
     @staticmethod
