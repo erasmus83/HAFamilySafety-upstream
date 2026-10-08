@@ -14,7 +14,7 @@
       },
       "auth": {
         "title": "Manuelle Microsoft Family Safety-Anmeldung",
-        "description": "Home Assistant konnte die sichere browsergestützte Anmeldung nicht verwenden, weil keine HTTPS-URL für Home Assistant konfiguriert ist. Öffne die Autorisierungs-URL, melde dich mit dem Elternkonto an und füge die vollständige Weiterleitungs-URL hier ein.",
+        "description": "Home Assistant konnte die sichere browsergestützte Anmeldung nicht verwenden, weil keine HTTPS-URL für Home Assistant konfiguriert ist. Öffne diese Microsoft-URL, melde dich mit dem Elternkonto an und füge die vollständige Weiterleitungs-URL hier ein:\n\n{auth_url}",
         "data": {
           "redirect_url": "Weiterleitungs-URL"
         }

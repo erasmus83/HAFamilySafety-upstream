@@ -8,7 +8,11 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
 from homeassistant.helpers import config_validation as cv
 
 from .const import (
@@ -267,8 +271,17 @@ def _register_services(hass: HomeAssistant) -> None:
         async def handler(call: ServiceCall) -> None:
             coordinator = _get_coordinator(hass)
             if coordinator is None:
-                raise RuntimeError("No Microsoft Family Safety coordinator available")
-            await getattr(coordinator, method_name)(*extract_args(call.data))
+                raise HomeAssistantError("No Microsoft Family Safety coordinator available")
+            try:
+                await getattr(coordinator, method_name)(*extract_args(call.data))
+            except HomeAssistantError:
+                raise
+            except Exception as err:  # noqa: BLE001 - report as a service error
+                # A raw exception surfaced as HTTP 500 on the REST API and could
+                # not be skipped with continue_on_error in automations (#54).
+                raise HomeAssistantError(
+                    f"Microsoft Family Safety {call.service} failed: {err}"
+                ) from err
         return handler
 
     for name, schema, method, extract in services:
