@@ -1704,6 +1704,167 @@ class FamilySafetyWebAPI:
         )
         return result if isinstance(result, dict) else None
 
+    @staticmethod
+    def parse_xbox_daily_restrictions(payload: object) -> dict[str, dict[str, Any]]:
+        """Map the policy payload to {day: {allowance, intervals}}.
+
+        Returns {} for anything unrecognised. An empty result must be treated as
+        "unknown", never as "no restrictions" -- callers use this to preserve
+        the parent's configured hours through a write, so guessing would erase
+        them.
+        """
+        if not isinstance(payload, dict):
+            return {}
+        data = payload.get("data")
+        container = data if isinstance(data, dict) else payload
+        restrictions = container.get("dailyRestrictions")
+        if not isinstance(restrictions, list):
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for entry in restrictions:
+            if not isinstance(entry, dict):
+                continue
+            day = str(entry.get("dayOfWeek", "")).lower()
+            if not day:
+                continue
+            ranges = entry.get("allowedScreenTimeRanges")
+            intervals = [
+                {"begin": str(r["begin"]), "end": str(r["end"])}
+                for r in (ranges if isinstance(ranges, list) else [])
+                if isinstance(r, dict) and "begin" in r and "end" in r
+            ]
+            out[day] = {
+                "allowance": str(entry.get("allowedTotalScreenTime", "")) or None,
+                "intervals": intervals,
+            }
+        return out
+
+    @staticmethod
+    def timespan_to_minutes(value: object) -> int | None:
+        """'01:30:00' -> 90. None for anything that is not HH:MM:SS."""
+        if not isinstance(value, str):
+            return None
+        parts = value.split(":")
+        if len(parts) != 3:
+            return None
+        try:
+            hours, minutes, seconds = (int(p) for p in parts)
+        except ValueError:
+            return None
+        if min(hours, minutes, seconds) < 0:
+            return None
+        return hours * 60 + minutes + (1 if seconds >= 30 else 0)
+
+    @staticmethod
+    def minutes_to_timespan(minutes: int) -> str:
+        """90 -> '01:30:00'. Clamped to a day; Microsoft rejects more."""
+        total = max(0, min(int(minutes), 24 * 60))
+        return f"{total // 60:02d}:{total % 60:02d}:00"
+
+    # Microsoft's own Family Safety UI only offers Xbox allowances in 15-minute
+    # steps, and every value on this account is a multiple of 15 (01:00:00,
+    # 03:00:00). Whether the API would accept 00:10:00 is untested, so match the
+    # UI rather than find out on a child's console.
+    XBOX_ALLOWANCE_STEP_MINUTES = 15
+
+    @classmethod
+    def quantise_xbox_minutes(cls, minutes: int) -> int:
+        """Floor to Xbox's 15-minute step.
+
+        Floor, never round: rounding 10 up to 15 would hand back five minutes
+        the shared pool does not have. The cost is that anything under 15
+        becomes 0 -- an early hard stop, which is the safe direction for a
+        parental control and the only honest option at this granularity.
+        """
+        step = cls.XBOX_ALLOWANCE_STEP_MINUTES
+        return max(0, int(minutes) // step * step)
+
+    async def set_xbox_daily_allowance(
+        self, child_id: str, day: str, minutes: int
+    ) -> bool:
+        """Set one day's Xbox allowance, PRESERVING that day's allowed hours.
+
+        set-custom-device-policy replaces the whole day policy, so the current
+        allowedScreenTimeRanges are read first and handed straight back. If they
+        cannot be read this raises rather than writing a guess -- silently
+        replacing the parent's Xbox hours with a default would be a far worse
+        failure than not applying a limit.
+
+        `minutes` is floored to a 15-minute step (see quantise_xbox_minutes), so
+        a request for 10 minutes writes 0. The effective value is returned by
+        reading the policy back.
+        """
+        policy = await self.get_xbox_screentime_policy(child_id)
+        restrictions = self.parse_xbox_daily_restrictions(policy)
+        key = day.lower()
+        current = restrictions.get(key)
+        if not current or not current["intervals"]:
+            raise FamilySafetyWebAPIError(
+                f"Cannot set the Xbox allowance for {key}: its current allowed "
+                "hours could not be read, and this call replaces them. Refusing "
+                "to overwrite the configured schedule with a guess."
+            )
+        effective = self.quantise_xbox_minutes(minutes)
+        if effective != int(minutes):
+            _LOGGER.debug(
+                "Xbox allowance %s min floored to %s min (15-minute granularity)",
+                minutes, effective,
+            )
+        return await self.set_xbox_screentime_policy(
+            child_id,
+            self.minutes_to_timespan(effective),
+            [key],
+            current["intervals"],
+        )
+
+    async def set_xbox_screentime_policy(
+        self,
+        child_id: str,
+        allowance: str,
+        days_of_week: list[str],
+        allowed_intervals: list[dict[str, str]],
+    ) -> bool:
+        """Set the Xbox daily allowance and permitted intervals.
+
+        Browser-captured request body, 162 bytes:
+            {"childId":"…","screenTimeUpdateParams":{
+             "allowance":"01:00:00","daysOfWeek":["sunday"],
+             "allowedIntervals":[{"begin":"07:00:00","end":"22:00:00"}]}}
+
+        This is a WHOLE-POLICY REPLACEMENT for the named days: allowance and
+        intervals go together in one call.  allowed_intervals is therefore
+        required, not optional -- passing a guess would silently overwrite the
+        parent's configured Xbox hours.  Read the current intervals and hand
+        them straight back when only the allowance is changing.
+        """
+        if not days_of_week:
+            raise ValueError("days_of_week must name at least one day")
+        if not allowed_intervals:
+            raise ValueError(
+                "allowed_intervals must be supplied -- this call replaces the "
+                "whole policy, so an empty list would wipe the permitted hours"
+            )
+        result = await self._web_request(
+            "POST",
+            f"{self.WEB_API_BASE}/family/api/xbox/screen-time-xbox/set-custom-device-policy",
+            json_data={
+                "childId": str(child_id),
+                "screenTimeUpdateParams": {
+                    "allowance": allowance,
+                    "daysOfWeek": [d.lower() for d in days_of_week],
+                    "allowedIntervals": allowed_intervals,
+                },
+            },
+            referer_override=self._platform_settings_referer("xbox", child_id),
+            isolated=True,
+        )
+        if result is None:
+            raise FamilySafetyWebAPIError(
+                "Xbox screen-time policy update failed"
+                + (f" ({self.last_isolated_error_code})" if self.last_isolated_error_code else "")
+            )
+        return True
+
     async def get_content_settings(self, child_id: str) -> dict | None:
         result = await self._request("GET", f"/v1/ContentRestrictions/{child_id}")
         return result if isinstance(result, dict) else None

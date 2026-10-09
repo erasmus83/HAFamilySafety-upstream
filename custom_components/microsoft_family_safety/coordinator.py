@@ -575,6 +575,47 @@ class FamilySafetyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         account_data["blocked_platforms"] = blocked
         account_data["xbox_lock_known"] = key[0] in self._xbox_lock_known
 
+    def _apply_xbox_limits(
+        self, account_data: dict[str, Any], policy: dict | None
+    ) -> None:
+        """Expose the Xbox per-day allowance and permitted hours.
+
+        Feeds number.<child>_xbox_limit_today, and lets a limit be set without
+        a blind read-modify-write. A failed read leaves the last values alone.
+        """
+        restrictions = FamilySafetyWebAPI.parse_xbox_daily_restrictions(policy)
+        if not restrictions:
+            return
+        today = dt_util.now().strftime("%A").lower()
+        account_data["xbox_daily_limits"] = {
+            day: FamilySafetyWebAPI.timespan_to_minutes(v["allowance"])
+            for day, v in restrictions.items()
+        }
+        account_data["xbox_allowed_hours"] = {
+            day: v["intervals"] for day, v in restrictions.items()
+        }
+        if today in restrictions:
+            account_data["xbox_limit_today"] = FamilySafetyWebAPI.timespan_to_minutes(
+                restrictions[today]["allowance"]
+            )
+
+    async def async_set_xbox_limit_today(self, account_id: str, minutes: int) -> None:
+        """Set today's Xbox allowance, in minutes.
+
+        Distinct from async_set_screentime_limit, which writes /st/day-allow --
+        the Windows/account schedule that has no effect on a console.
+        """
+        if self.web_api is None or not self.web_api.has_web_cookies:
+            raise RuntimeError(
+                "The Family web session is unavailable, and the Xbox policy can "
+                "only be set through it."
+            )
+        if not 0 <= minutes <= 1440:
+            raise ValueError("Xbox allowance must be between 0 and 1440 minutes")
+        day = dt_util.now().strftime("%A").lower()
+        await self.web_api.set_xbox_daily_allowance(account_id, day, minutes)
+        await self.async_request_refresh()
+
     async def async_lock_platform(
         self, account_id: str, platform: str, valid_until: datetime | None = None
     ) -> None:
@@ -1449,6 +1490,7 @@ class FamilySafetyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._apply_xbox_lock_state(
                     account_id, accounts_data[account_id], web_data.get("xbox_policy")
                 )
+                self._apply_xbox_limits(accounts_data[account_id], web_data.get("xbox_policy"))
                 # Xbox usage: since about 2026-08-20 the mobile aggregator
                 # reports 0 (or a stale figure) for Xbox play on some accounts,
                 # so read the Xbox activity report from the web API as well.
